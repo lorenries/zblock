@@ -23,7 +23,6 @@
 - Browser built-in DoH/DoT does not bypass for a curated set of popular resolvers.
 - Rebooting the Mac during a session keeps the block active until the timer expires.
 - Attempting to disable pf is countered by the daemon within ≤10 seconds.
-- `zblock stop` is a no-op while active; an explicit `zblock emergency-unblock` is required.
 
 **Quality / UX metrics:**
 
@@ -84,7 +83,7 @@ Use cases:
   - Installs launchd daemon (`zblockd`), creates pf anchor template, verifies pf availability, sets directories.
 
 - `zblock add <domains...> [--group <name>]`
-  - Adds domains to `targets.json`; normalizes and dedupes; supports groups (default: `default`).
+  - Adds domains to `config.json`; normalizes and dedupes; supports groups (default: `default`).
 
 - `zblock list [--group <name>]`
   - Prints groups and domains; supports JSON output with `--json`.
@@ -94,12 +93,6 @@ Use cases:
 
 - `zblock status`
   - Shows active window, remaining time, pf state, rules/anchors loaded, current tables (counts), daemon health.
-
-- `zblock stop`
-  - No-op during an active session; prints guidance to use `emergency-unblock`.
-
-- `zblock emergency-unblock [--force]`
-  - Requires admin auth; inserts 60s delay + confirmation; logs event; cleanly removes rules and returns pf to prior state.
 
 - `zblock uninstall`
   - Removes daemon/anchor only when no active session; leaves user data unless `--purge`.
@@ -176,7 +169,7 @@ Use cases:
 
 ### 8.3 IPC schema
 
-- Socket messages are JSON frames with an `op` field: `start`, `status`, `stop`, `emergency_unblock`, `ping`.
+- Socket messages are JSON frames with an `op` field: `start`, `status`, `ping`.
 - Daemon replies with `{ ok: bool, error?: string, data?: any }`.
 
 ### 8.4 PF anchor template (generated once)
@@ -242,7 +235,7 @@ block out quick from any to <zblock_v6>
 
 1. **Bootstrap project**
    - Initialize Zig project, `build.zig`, `README` with usage.
-   - Implement `zblock list/add` reading/writing `targets.json`.
+   - Implement `zblock list/add` reading/writing `config.json`.
 
 2. **pf integration (dry-run)**
    - Generate anchor from template; `pfctl -nf` syntax check; no enforcement yet.
@@ -260,7 +253,7 @@ block out quick from any to <zblock_v6>
    - Re-apply if pf off/anchor missing.
 
 6. **Session lifecycle**
-   - Start/stop/emergency-unblock flows; on-boot restoration; logging.
+   - Start flows; on-boot restoration; logging.
 
 7. **Tests & packaging**
    - Unit tests; integration tests using a simulated ruleset (mock `pfctl` binary for CI).
@@ -269,14 +262,13 @@ block out quick from any to <zblock_v6>
 ### 10.3 Agent task backlog (atomic, verifiable steps)
 
 - T-001: Create `paths` module that resolves per-user and system paths; unit tests.
-- T-002: Implement `targets.json` schema + JSON (de)serialization; dedupe + normalization (punycode, lowercasing).
+- T-002: Implement `config.json` schema + JSON (de)serialization; dedupe + normalization (punycode, lowercasing).
 - T-003: Write anchor template to `/etc/pf.anchors/zblock`; add `pfctl -nf` dry-run step; return diagnostics.
 - T-004: Implement `pfctl` wrapper with `-T replace` and error mapping → structured codes.
 - T-005: Implement resolver with timeouts, parallelism, and min/max TTL caps.
 - T-006: Implement daemon `start` op: compute end-time, write `active.json`, apply rules.
 - T-007: Implement watchdog that re-enables pf when active every 5–10s.
 - T-008: Implement `status` op returning JSON.
-- T-009: Implement `emergency-unblock` with enforced delay + admin auth stub (prompt via helper).
 - T-010: Add utun interface detection and temporary block rules during session.
 - T-011: Add DNS lockdown switches and DoH table support.
 
@@ -319,17 +311,6 @@ $ zblock status --json
 }
 ```
 
-```
-$ zblock emergency-unblock
-Emergency unblock requested. This will:
-  • remove pf rules
-  • re-open DNS/DoT
-Proceed? (yes/no): yes
-Please authenticate as an administrator…
-Waiting 60 seconds before continuing…
-Done. Focus session ended early (logged at /var/log/zblock/actions.log)
-```
-
 ### 11.2 Errors
 
 - If pf syntax invalid → show `pfctl -nf` stderr and abort.
@@ -352,7 +333,7 @@ Done. Focus session ended early (logged at /var/log/zblock/actions.log)
 ## 13) Test plan
 
 - **Unit:** domain normalization; resolver timeout/backoff; atomic writes; IPC framing.
-- **Integration (local):** start/stop flows on a test host; verify `curl` to blocked domains and direct IPs fails; verify DNS changes don’t help; verify pf auto re-enable after manual `pfctl -d`.
+- **Integration (local):** start flows on a test host; verify `curl` to blocked domains and direct IPs fails; verify DNS changes don’t help; verify pf auto re-enable after manual `pfctl -d`.
 - **Reboot tests:** active session survives reboot; end-time honored.
 - **Regression:** table replace is atomic; partial writes never leave pf in inconsistent state.
 
@@ -363,7 +344,6 @@ Done. Focus session ended early (logged at /var/log/zblock/actions.log)
 - **pf changes across macOS versions:** keep anchor minimal; rely on `pfctl` CLI instead of `/dev/pf` ioctls initially.
 - **DoH list completeness:** treat as best-effort; ship a curated baseline and allow user append.
 - **False positives (shared IPs/CDNs):** offer `--strict-ip` flag to require domain+SNI (future NE path).
-- **User locks themselves out:** documented emergency-unblock with enforced delay; offline README instructions for manual recovery.
 
 ---
 
