@@ -535,13 +535,79 @@ fn handleStatus(ctx: RunContext, args: *std.process.ArgIterator) !u8 {
     }
 
     const group = status.group orelse "default";
-    const until_epoch = status.until_epoch orelse 0;
+    const until_epoch_raw = status.until_epoch orelse 0;
+    const until_epoch: u64 = if (until_epoch_raw < 0) 0 else @as(u64, @intCast(until_epoch_raw));
     const remaining = status.remaining_seconds orelse 0;
 
+    const ends_at = try formatEpochUtc(ctx.allocator, until_epoch);
+    defer ctx.allocator.free(ends_at);
+
+    const remaining_text = try formatDuration(ctx.allocator, remaining);
+    defer ctx.allocator.free(remaining_text);
+
     try printFmt(ctx.allocator, ctx.stdout_fd, "Active session for group '{s}'\n", .{group});
-    try printFmt(ctx.allocator, ctx.stdout_fd, "  Ends at epoch {d} (remaining {d} seconds)\n", .{ until_epoch, remaining });
+    try printFmt(ctx.allocator, ctx.stdout_fd, "  Ends at {s} (in {s})\n", .{ ends_at, remaining_text });
     try printFmt(ctx.allocator, ctx.stdout_fd, "  Targets: v4={d}, v6={d}, dns_lockdown={s}\n", .{ status.v4_count, status.v6_count, if (status.dns_lockdown) "true" else "false" });
     return 0;
+}
+
+fn formatEpochUtc(allocator: std.mem.Allocator, epoch_seconds: u64) ![]u8 {
+    const epoch = std.time.epoch.EpochSeconds{ .secs = epoch_seconds };
+    const year_day = epoch.getEpochDay().calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const day_seconds = epoch.getDaySeconds();
+
+    return std.fmt.allocPrint(
+        allocator,
+        "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2} UTC",
+        .{
+            year_day.year,
+            month_day.month.numeric(),
+            @as(u8, @intCast(month_day.day_index + 1)),
+            day_seconds.getHoursIntoDay(),
+            day_seconds.getMinutesIntoHour(),
+            day_seconds.getSecondsIntoMinute(),
+        },
+    );
+}
+
+fn formatDuration(allocator: std.mem.Allocator, total_seconds: u64) ![]u8 {
+    if (total_seconds == 0) {
+        return std.fmt.allocPrint(allocator, "0s", .{});
+    }
+
+    const days = total_seconds / std.time.s_per_day;
+    var remainder = total_seconds % std.time.s_per_day;
+    const hours = remainder / std.time.s_per_hour;
+    remainder %= std.time.s_per_hour;
+    const minutes = remainder / std.time.s_per_min;
+    const seconds = remainder % std.time.s_per_min;
+
+    var buffer = std.ArrayListUnmanaged(u8){};
+    errdefer buffer.deinit(allocator);
+    var writer = buffer.writer(allocator);
+
+    var wrote = false;
+    if (days != 0) {
+        try std.fmt.format(writer, "{d}d", .{days});
+        wrote = true;
+    }
+    if (hours != 0) {
+        if (wrote) try writer.writeByte(' ');
+        try std.fmt.format(writer, "{d}h", .{hours});
+        wrote = true;
+    }
+    if (minutes != 0) {
+        if (wrote) try writer.writeByte(' ');
+        try std.fmt.format(writer, "{d}m", .{minutes});
+        wrote = true;
+    }
+    if (seconds != 0 or !wrote) {
+        if (wrote) try writer.writeByte(' ');
+        try std.fmt.format(writer, "{d}s", .{seconds});
+    }
+
+    return buffer.toOwnedSlice(allocator);
 }
 
 fn handleUninstall(ctx: RunContext, args: *std.process.ArgIterator) !u8 {
