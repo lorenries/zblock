@@ -27,17 +27,12 @@ pub fn resolveDomains(allocator: std.mem.Allocator, domains: []const []const u8)
     }
 
     for (domains) |domain| {
-        var list = std.net.getAddressList(allocator, domain, 0) catch continue;
-        defer list.deinit();
+        resolveHost(allocator, domain, &v4_list, &v6_list) catch {};
 
-        for (list.addrs) |addr| {
-            const rendered = addressToString(allocator, addr) catch continue;
-
-            switch (addr.any.family) {
-                std.posix.AF.INET => appendUnique(&v4_list, allocator, rendered) catch allocator.free(rendered),
-                std.posix.AF.INET6 => appendUnique(&v6_list, allocator, rendered) catch allocator.free(rendered),
-                else => allocator.free(rendered),
-            }
+        if (shouldResolveWwwAlias(domain)) {
+            const alias = std.fmt.allocPrint(allocator, "www.{s}", .{domain}) catch continue;
+            defer allocator.free(alias);
+            resolveHost(allocator, alias, &v4_list, &v6_list) catch {};
         }
     }
 
@@ -45,6 +40,40 @@ pub fn resolveDomains(allocator: std.mem.Allocator, domains: []const []const u8)
         .v4 = try v4_list.toOwnedSlice(allocator),
         .v6 = try v6_list.toOwnedSlice(allocator),
     };
+}
+
+fn resolveHost(
+    allocator: std.mem.Allocator,
+    host: []const u8,
+    v4_list: *std.ArrayListUnmanaged([]u8),
+    v6_list: *std.ArrayListUnmanaged([]u8),
+) !void {
+    var list = std.net.getAddressList(allocator, host, 0) catch return;
+    defer list.deinit();
+
+    for (list.addrs) |addr| {
+        const rendered = addressToString(allocator, addr) catch continue;
+
+        switch (addr.any.family) {
+            std.posix.AF.INET => appendUnique(v4_list, allocator, rendered) catch allocator.free(rendered),
+            std.posix.AF.INET6 => appendUnique(v6_list, allocator, rendered) catch allocator.free(rendered),
+            else => allocator.free(rendered),
+        }
+    }
+}
+
+fn shouldResolveWwwAlias(domain: []const u8) bool {
+    if (domain.len == 0) return false;
+    if (std.mem.startsWith(u8, domain, "www.")) return false;
+    return countDots(domain) == 1;
+}
+
+fn countDots(slice: []const u8) usize {
+    var total: usize = 0;
+    for (slice) |ch| {
+        if (ch == '.') total += 1;
+    }
+    return total;
 }
 
 fn appendUnique(list: *std.ArrayListUnmanaged([]u8), allocator: std.mem.Allocator, addr: []u8) !void {

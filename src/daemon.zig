@@ -103,6 +103,14 @@ const Daemon = struct {
         }
     }
 
+    fn schedulePfClear(self: *Daemon, pf_was_enabled: bool) void {
+        const thread = std.Thread.spawn(.{}, pfClearRunner, .{ self, pf_was_enabled }) catch {
+            runPfClearSync(self, pf_was_enabled);
+            return;
+        };
+        thread.detach();
+    }
+
     fn watchdogMain(self: *Daemon) void {
         defer {
             self.watchdog_stop.store(true, .release);
@@ -167,19 +175,16 @@ const Daemon = struct {
         std.log.debug("handleStart: acquiring mutex", .{});
         self.mutex.lock();
         var locked = true;
-        var join_watchdog: bool = false;
-        defer if (join_watchdog) self.stopWatchdog();
         defer if (locked) self.mutex.unlock();
 
         const now = std.time.timestamp();
-        join_watchdog = try self.ensureSessionFreshnessLocked(now);
-        std.log.debug("handleStart: join_watchdog after freshness? {}", .{join_watchdog});
+        try self.ensureSessionFreshnessLocked(now);
 
         if (self.session) |session| {
             if (now < session.end_epoch) {
                 return makeErrorResponse(self.allocator, "session already active");
             }
-            join_watchdog = join_watchdog or try self.teardownSessionLocked(false);
+            _ = try self.teardownSessionLocked(false);
         }
 
         const canonical_group = try config_mod.normalizeGroupNameCopy(self.allocator, start_cmd.group);
@@ -234,11 +239,6 @@ const Daemon = struct {
         self.mutex.unlock();
         std.log.debug("handleStart: mutex released", .{});
 
-        if (join_watchdog) {
-            self.stopWatchdog();
-            join_watchdog = false;
-        }
-
         try self.startWatchdog();
         std.log.debug("handleStart: watchdog started", .{});
 
@@ -251,7 +251,7 @@ const Daemon = struct {
         self.mutex.lock();
 
         const now = std.time.timestamp();
-        const need_join = try self.ensureSessionFreshnessLocked(now);
+        try self.ensureSessionFreshnessLocked(now);
         var status = ipc.StatusData{ .active = false, .dns_lockdown = false, .v4_count = 0, .v6_count = 0 };
 
         if (self.session) |session| {
@@ -269,20 +269,18 @@ const Daemon = struct {
         }
 
         self.mutex.unlock();
-        if (need_join) self.stopWatchdog();
 
         std.log.info("status request processed (active={s})", .{if (status.active) "true" else "false"});
 
         return ipc.Response{ .ok = true, .message = null, .status = status };
     }
 
-    fn ensureSessionFreshnessLocked(self: *Daemon, now: i64) !bool {
+    fn ensureSessionFreshnessLocked(self: *Daemon, now: i64) !void {
         if (self.session) |session| {
             if (now >= session.end_epoch) {
-                return self.teardownSessionLocked(false);
+                _ = try self.teardownSessionLocked(false);
             }
         }
-        return false;
     }
 
     fn teardownSessionLocked(self: *Daemon, called_from_watchdog: bool) !bool {
@@ -291,11 +289,17 @@ const Daemon = struct {
             const pf_was_enabled = session.pf_was_enabled;
             self.session = null;
             self.watchdog_stop.store(true, .release);
-            pf.clearRules(self.allocator, &self.paths, pf_was_enabled) catch |err| {
-                std.log.err("failed to clear pf rules: {s}", .{@errorName(err)});
-            };
+
+            if (!called_from_watchdog) {
+                if (self.watchdog_thread) |thread| {
+                    thread.detach();
+                    self.watchdog_thread = null;
+                }
+            }
+
             self.deleteActiveFile();
-            return !called_from_watchdog and self.watchdog_thread != null;
+            self.schedulePfClear(pf_was_enabled);
+            return false;
         }
         return false;
     }
@@ -482,6 +486,16 @@ fn makeOkResponse(allocator: std.mem.Allocator, message: ?[]const u8) !ipc.Respo
 fn makeErrorResponse(allocator: std.mem.Allocator, message: []const u8) !ipc.Response {
     const response = ipc.Response{ .ok = false, .message = try allocator.dupe(u8, message), .status = null };
     return response;
+}
+
+fn pfClearRunner(self: *Daemon, pf_was_enabled: bool) void {
+    runPfClearSync(self, pf_was_enabled);
+}
+
+fn runPfClearSync(self: *Daemon, pf_was_enabled: bool) void {
+    pf.clearRules(self.allocator, &self.paths, pf_was_enabled) catch |err| {
+        std.log.err("failed to clear pf rules: {s}", .{@errorName(err)});
+    };
 }
 
 pub fn run(allocator: std.mem.Allocator) !void {

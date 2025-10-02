@@ -61,6 +61,16 @@ pub fn clearRules(allocator: std.mem.Allocator, paths: *const Paths.Paths, pf_wa
         log.warn("failed to flush {s}: {s}", .{ table_doh, @errorName(err) });
     };
 
+    fs_util.atomicWriteFileAbsolute(paths.blockedV4TablePath(), "") catch |err| {
+        log.warn("failed to truncate {s}: {s}", .{ paths.blockedV4TablePath(), @errorName(err) });
+    };
+    fs_util.atomicWriteFileAbsolute(paths.blockedV6TablePath(), "") catch |err| {
+        log.warn("failed to truncate {s}: {s}", .{ paths.blockedV6TablePath(), @errorName(err) });
+    };
+    fs_util.atomicWriteFileAbsolute(paths.dohTablePath(), "") catch |err| {
+        log.warn("failed to truncate {s}: {s}", .{ paths.dohTablePath(), @errorName(err) });
+    };
+
     writeAnchor(allocator, paths, false) catch |err| {
         log.warn("failed to reset anchor template: {s}", .{@errorName(err)});
     };
