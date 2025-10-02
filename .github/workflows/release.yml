@@ -6,8 +6,8 @@ on:
       - "v*"
   workflow_dispatch:
 
-env:
-  ZIG_VERSION: 0.15.1
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -19,9 +19,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Zig
-        uses: mlugg/setup-zig@v1
+        uses: mlugg/setup-zig@v2
         with:
-          version: ${{ env.ZIG_VERSION }}
+          version: 0.15.1
 
       - name: Build release binaries
         run: zig build -Doptimize=ReleaseFast
@@ -33,23 +33,29 @@ jobs:
         run: |
           ARCH=$(uname -m)
           OS=${RUNNER_OS:-unknown}
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            VERSION="${GITHUB_SHA}"
+          fi
           echo "ARCH=$ARCH" >> "$GITHUB_ENV"
           echo "OS=$OS" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           mkdir -p dist
           cp zig-out/bin/zblock dist/
           cp zig-out/bin/zblockd dist/
-          (cd dist && tar -czf "zblock-${OS}-${ARCH}.tar.gz" zblock zblockd)
+          (cd dist && tar -czf "zblock-${VERSION}-${OS}-${ARCH}.tar.gz" zblock zblockd)
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: zblock-${{ env.OS }}-${{ env.ARCH }}
-          path: dist/zblock-${{ env.OS }}-${{ env.ARCH }}.tar.gz
+          name: zblock-${{ env.VERSION }}-${{ env.OS }}-${{ env.ARCH }}
+          path: dist/zblock-${{ env.VERSION }}-${{ env.OS }}-${{ env.ARCH }}.tar.gz
 
       - name: Publish release assets
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
-          files: dist/zblock-${{ env.OS }}-${{ env.ARCH }}.tar.gz
+          files: dist/zblock-${{ env.VERSION }}-${{ env.OS }}-${{ env.ARCH }}.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
