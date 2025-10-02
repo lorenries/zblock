@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  ZIG_VERSION: 0.16.0-dev.393+dd4be26f5
+
+jobs:
+  build:
+    name: Build and Publish
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Build release binaries
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: Run tests
+        run: zig build test
+
+      - name: Prepare artifacts
+        run: |
+          ARCH=$(uname -m)
+          OS=${RUNNER_OS:-unknown}
+          echo "ARCH=$ARCH" >> "$GITHUB_ENV"
+          echo "OS=$OS" >> "$GITHUB_ENV"
+          mkdir -p dist
+          cp zig-out/bin/zblock dist/
+          cp zig-out/bin/zblockd dist/
+          (cd dist && tar -czf "zblock-${OS}-${ARCH}.tar.gz" zblock zblockd)
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zblock-${{ env.OS }}-${{ env.ARCH }}
+          path: dist/zblock-${{ env.OS }}-${{ env.ARCH }}.tar.gz
+
+      - name: Publish release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/zblock-${{ env.OS }}-${{ env.ARCH }}.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
