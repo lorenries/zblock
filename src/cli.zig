@@ -723,7 +723,7 @@ fn renderLaunchdPlist(allocator: std.mem.Allocator, paths: *const paths_mod.Path
 }
 
 fn runLaunchctlCommand(ctx: RunContext, label: []const u8, argv: []const []const u8, description: []const u8, ignore_failure: bool) !void {
-    var result = std.process.Child.run(.{ .allocator = ctx.allocator, .argv = argv }) catch |err| {
+    const result = std.process.Child.run(.{ .allocator = ctx.allocator, .argv = argv }) catch |err| {
         try printFmt(ctx.allocator, ctx.stderr_fd, "{s}: failed to execute {s} ({s})\n", .{ label, description, @errorName(err) });
         return err;
     };

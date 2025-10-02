@@ -3,11 +3,11 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
   workflow_dispatch:
 
 env:
-  ZIG_VERSION: 0.16.0-dev.393+dd4be26f5
+  ZIG_VERSION: 0.15.1
 
 jobs:
   build:

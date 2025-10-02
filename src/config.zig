@@ -37,7 +37,7 @@ pub const Config = struct {
         var free_normalized = true;
         defer if (free_normalized) self.allocator.free(normalized);
 
-        var entry = try self.groups.getOrPut(self.allocator, normalized);
+        const entry = try self.groups.getOrPut(self.allocator, normalized);
         if (entry.found_existing) {
             return entry.value_ptr;
         }
@@ -68,7 +68,7 @@ pub const Config = struct {
             var free_normalized = true;
             defer if (free_normalized) self.allocator.free(normalized);
 
-            var domain_entry = try group_ptr.getOrPut(self.allocator, normalized);
+            const domain_entry = try group_ptr.getOrPut(self.allocator, normalized);
             if (domain_entry.found_existing) {
                 continue;
             }

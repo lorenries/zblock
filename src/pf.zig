@@ -234,7 +234,7 @@ fn renderAnchor(allocator: std.mem.Allocator, paths: *const Paths.Paths, dns_loc
 }
 
 fn runPfctl(allocator: std.mem.Allocator, argv: []const []const u8, description: []const u8) !void {
-    var result = try std.process.Child.run(.{ .allocator = allocator, .argv = argv });
+    const result = try std.process.Child.run(.{ .allocator = allocator, .argv = argv });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -257,7 +257,7 @@ const CommandOutput = struct {
 };
 
 fn runPfctlCapture(allocator: std.mem.Allocator, argv: []const []const u8, description: []const u8) !CommandOutput {
-    var result = try std.process.Child.run(.{ .allocator = allocator, .argv = argv });
+    const result = try std.process.Child.run(.{ .allocator = allocator, .argv = argv });
 
     switch (result.term) {
         .Exited => |code| {
