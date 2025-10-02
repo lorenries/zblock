@@ -1,4 +1,5 @@
 const std = @import("std");
+const testing = std.testing;
 
 pub const Targets = struct {
     v4: [][]u8,
@@ -74,6 +75,29 @@ fn countDots(slice: []const u8) usize {
         if (ch == '.') total += 1;
     }
     return total;
+}
+
+test "appendUnique deduplicates entries" {
+    var list = std.ArrayListUnmanaged([]u8){};
+    defer {
+        for (list.items) |addr| testing.allocator.free(addr);
+        list.deinit(testing.allocator);
+    }
+
+    try appendUnique(&list, testing.allocator, try testing.allocator.dupe(u8, "1.2.3.4"));
+    try appendUnique(&list, testing.allocator, try testing.allocator.dupe(u8, "1.2.3.4"));
+    try appendUnique(&list, testing.allocator, try testing.allocator.dupe(u8, "5.6.7.8"));
+
+    try testing.expectEqual(@as(usize, 2), list.items.len);
+    try testing.expect(std.mem.eql(u8, list.items[0], "1.2.3.4"));
+    try testing.expect(std.mem.eql(u8, list.items[1], "5.6.7.8"));
+}
+
+test "shouldResolveWwwAlias logic" {
+    try testing.expect(!shouldResolveWwwAlias(""));
+    try testing.expect(!shouldResolveWwwAlias("www.example.com"));
+    try testing.expect(shouldResolveWwwAlias("example.com"));
+    try testing.expect(!shouldResolveWwwAlias("deep.sub.example.com"));
 }
 
 fn appendUnique(list: *std.ArrayListUnmanaged([]u8), allocator: std.mem.Allocator, addr: []u8) !void {

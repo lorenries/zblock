@@ -1,4 +1,5 @@
 const std = @import("std");
+const testing = std.testing;
 
 pub const DEFAULT_SOCKET_PATH = "/var/run/zblock/zblockd.sock";
 
@@ -397,4 +398,54 @@ fn appendSigned(buffer: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocato
     var tmp: [32]u8 = undefined;
     const slice = try std.fmt.bufPrint(&tmp, "{}", .{value});
     try buffer.appendSlice(allocator, slice);
+}
+
+test "encode/decode start request round trip" {
+    var allocator = testing.allocator;
+    var request = Request{
+        .op = .start,
+        .start = StartCommand{
+            .group = try allocator.dupe(u8, "default"),
+            .duration_seconds = 60,
+            .dns_lockdown = true,
+        },
+    };
+    defer request.deinit(allocator);
+
+    const encoded = try encodeRequest(allocator, request);
+    defer allocator.free(encoded);
+
+    var decoded = try decodeRequest(allocator, encoded);
+    defer decoded.deinit(allocator);
+
+    try testing.expectEqual(RequestOp.start, decoded.op);
+    try testing.expect(decoded.start != null);
+    try testing.expectEqualStrings("default", decoded.start.?.group);
+    try testing.expectEqual(@as(u64, 60), decoded.start.?.duration_seconds);
+    try testing.expect(decoded.start.?.dns_lockdown);
+}
+
+test "decodeRequest fails on missing op" {
+    const payload = "{\"start\":{}}";
+    try testing.expectError(Error.InvalidFormat, decodeRequest(testing.allocator, payload));
+}
+
+test "encode/decode response with status" {
+    var allocator = testing.allocator;
+    var response = Response{
+        .ok = true,
+        .status = StatusData{ .active = true, .group = try allocator.dupe(u8, "default"), .until_epoch = 123, .remaining_seconds = 45, .dns_lockdown = false, .v4_count = 2, .v6_count = 1 },
+    };
+    defer response.deinit(allocator);
+
+    const encoded = try encodeResponse(allocator, response);
+    defer allocator.free(encoded);
+
+    var decoded = try decodeResponse(allocator, encoded);
+    defer decoded.deinit(allocator);
+
+    try testing.expect(decoded.ok);
+    try testing.expect(decoded.status != null);
+    try testing.expectEqualStrings("default", decoded.status.?.group.?);
+    try testing.expectEqual(@as(usize, 2), decoded.status.?.v4_count);
 }

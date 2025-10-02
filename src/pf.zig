@@ -2,6 +2,7 @@ const std = @import("std");
 const fs_util = @import("fs.zig");
 const dns = @import("dns.zig");
 const Paths = @import("paths.zig");
+const testing = std.testing;
 
 const log = std.log;
 
@@ -83,6 +84,71 @@ pub fn clearRules(allocator: std.mem.Allocator, paths: *const Paths.Paths, pf_wa
             log.warn("failed to disable pf: {s}", .{@errorName(err)});
         };
     }
+}
+
+test "renderAnchor emits dns lockdown rules" {
+    var gpa = testing.allocator;
+    var tmp = try testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(gpa, ".");
+    defer gpa.free(base);
+
+    const config_dir = try std.fs.path.join(gpa, &.{ base, "config" });
+    const state_dir = try std.fs.path.join(gpa, &.{ base, "state" });
+    const log_dir = try std.fs.path.join(gpa, &.{ base, "log" });
+    const run_dir = try std.fs.path.join(gpa, &.{ base, "run" });
+    defer gpa.free(config_dir);
+    defer gpa.free(state_dir);
+    defer gpa.free(log_dir);
+    defer gpa.free(run_dir);
+
+    try tmp.dir.makePath("config");
+    try tmp.dir.makePath("state");
+    try tmp.dir.makePath("log");
+    try tmp.dir.makePath("run");
+
+    var paths = try Paths.init(gpa, .{
+        .config_dir = config_dir,
+        .state_dir = state_dir,
+        .log_dir = log_dir,
+        .run_dir = run_dir,
+    });
+    defer paths.deinit();
+
+    const anchor_contents = try renderAnchor(gpa, &paths, true);
+    defer gpa.free(anchor_contents);
+
+    try testing.expect(std.mem.indexOf(u8, anchor_contents, "block out quick proto { udp tcp } from any to any port 53") != null);
+    try testing.expect(std.mem.indexOf(u8, anchor_contents, "table <zblock_v4>") != null);
+}
+
+test "writeList writes newline separated data" {
+    var tmp = try testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(base);
+
+    const file_path = try std.fs.path.join(testing.allocator, &.{ base, "list.txt" });
+    defer testing.allocator.free(file_path);
+
+    var entries = try testing.allocator.alloc([]u8, 2);
+    defer {
+        for (entries) |entry| testing.allocator.free(entry);
+        testing.allocator.free(entries);
+    }
+    entries[0] = try testing.allocator.dupe(u8, "1.2.3.4");
+    entries[1] = try testing.allocator.dupe(u8, "5.6.7.8");
+
+    try writeList(testing.allocator, file_path, entries);
+
+    var file = try std.fs.openFileAbsolute(file_path, .{});
+    defer file.close();
+    const contents = try file.readToEndAlloc(testing.allocator, 1024);
+    defer testing.allocator.free(contents);
+
+    try testing.expectEqualStrings("1.2.3.4\n5.6.7.8", contents);
 }
 
 pub fn uninstallCleanup(allocator: std.mem.Allocator) void {
