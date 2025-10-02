@@ -439,16 +439,18 @@ fn handleStart(ctx: RunContext, args: *std.process.ArgIterator) !u8 {
         return 1;
     };
 
-    const group_name = group_override orelse "default";
-    const canonical_group = config_mod.normalizeGroupNameCopy(ctx.allocator, group_name) catch |err| {
-        try printFmt(ctx.allocator, ctx.stderr_fd, "zblock start: invalid group name '{s}' ({s})\n", .{ group_name, @errorName(err) });
-        return 1;
-    };
+    var start_group: ?[]u8 = null;
+    if (group_override) |group_name| {
+        start_group = config_mod.normalizeGroupNameCopy(ctx.allocator, group_name) catch |err| {
+            try printFmt(ctx.allocator, ctx.stderr_fd, "zblock start: invalid group name '{s}' ({s})\n", .{ group_name, @errorName(err) });
+            return 1;
+        };
+    }
 
     var request = ipc.Request{
         .op = .start,
         .start = ipc.StartCommand{
-            .group = canonical_group,
+            .group = start_group,
             .duration_seconds = duration_seconds,
             .dns_lockdown = dns_lockdown,
         },
@@ -920,10 +922,10 @@ fn printListHelp(fd: posix.fd_t) !void {
 
 fn printStartHelp(fd: posix.fd_t) !void {
     try writeAll(fd, "Usage: zblock start --for <duration> [--group <name>] [--dns-lockdown]\n\n" ++
-        "Starts a focus session for the configured group (default: 'default').\n" ++
+        "Starts a focus session for the configured group (default: all groups).\n" ++
         "Options:\n" ++
         "  --for <duration>  Required; accepts Ns/Nm/Nh or plain seconds.\n" ++
-        "  --group <name>    Target group (default: 'default').\n" ++
+        "  --group <name>    Target group (default: all groups).\n" ++
         "  --group=<name>    Alternate --group syntax.\n" ++
         "  --dns-lockdown    Block DNS egress (ports 53/853 + known DoH endpoints).\n" ++
         "  --help, -h        Show this help text.\n" ++

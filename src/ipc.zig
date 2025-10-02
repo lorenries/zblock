@@ -96,12 +96,12 @@ fn getEnvOwned(allocator: std.mem.Allocator, name: []const u8) !?[]u8 {
 pub const RequestOp = enum { start, status, ping };
 
 pub const StartCommand = struct {
-    group: []u8,
+    group: ?[]u8 = null,
     duration_seconds: u64,
     dns_lockdown: bool = false,
 
     pub fn deinit(self: *StartCommand, allocator: std.mem.Allocator) void {
-        allocator.free(self.group);
+        if (self.group) |value| allocator.free(value);
         self.* = undefined;
     }
 };
@@ -154,9 +154,12 @@ pub fn encodeRequest(allocator: std.mem.Allocator, request: Request) ![]u8 {
 
     if (request.start) |start_cmd| {
         try buffer.appendSlice(allocator, ",\"start\":{");
-        try buffer.appendSlice(allocator, "\"group\":");
-        try appendJsonString(&buffer, allocator, start_cmd.group);
-        try buffer.appendSlice(allocator, ",\"duration_seconds\":");
+        if (start_cmd.group) |group| {
+            try buffer.appendSlice(allocator, "\"group\":");
+            try appendJsonString(&buffer, allocator, group);
+            try buffer.appendSlice(allocator, ",");
+        }
+        try buffer.appendSlice(allocator, "\"duration_seconds\":");
         try appendUnsigned(&buffer, allocator, start_cmd.duration_seconds);
         try buffer.appendSlice(allocator, ",\"dns_lockdown\":");
         try buffer.appendSlice(allocator, if (start_cmd.dns_lockdown) "true" else "false");
@@ -193,12 +196,14 @@ pub fn decodeRequest(allocator: std.mem.Allocator, bytes: []const u8) !Request {
             else => return error.InvalidFormat,
         };
 
-        const group_value_ptr = start_obj.getPtr("group") orelse return error.InvalidFormat;
-        const group_str = switch (group_value_ptr.*) {
-            .string => |s| s,
-            else => return error.InvalidFormat,
-        };
-        const group_copy = try allocator.dupe(u8, group_str);
+        var group_copy: ?[]u8 = null;
+        if (start_obj.getPtr("group")) |group_value_ptr| {
+            const group_str = switch (group_value_ptr.*) {
+                .string => |s| s,
+                else => return error.InvalidFormat,
+            };
+            group_copy = try allocator.dupe(u8, group_str);
+        }
 
         const duration_value_ptr = start_obj.getPtr("duration_seconds") orelse return error.InvalidFormat;
         const duration_seconds = switch (duration_value_ptr.*) {
@@ -420,9 +425,33 @@ test "encode/decode start request round trip" {
 
     try testing.expectEqual(RequestOp.start, decoded.op);
     try testing.expect(decoded.start != null);
-    try testing.expectEqualStrings("default", decoded.start.?.group);
+    try testing.expect(decoded.start.?.group != null);
+    try testing.expectEqualStrings("default", decoded.start.?.group.?);
     try testing.expectEqual(@as(u64, 60), decoded.start.?.duration_seconds);
     try testing.expect(decoded.start.?.dns_lockdown);
+}
+
+test "encode/decode start request without group" {
+    var allocator = testing.allocator;
+    var request = Request{
+        .op = .start,
+        .start = StartCommand{
+            .group = null,
+            .duration_seconds = 120,
+            .dns_lockdown = false,
+        },
+    };
+    defer request.deinit(allocator);
+
+    const encoded = try encodeRequest(allocator, request);
+    defer allocator.free(encoded);
+
+    var decoded = try decodeRequest(allocator, encoded);
+    defer decoded.deinit(allocator);
+
+    try testing.expect(decoded.start != null);
+    try testing.expect(decoded.start.?.group == null);
+    try testing.expectEqual(@as(u64, 120), decoded.start.?.duration_seconds);
 }
 
 test "decodeRequest fails on missing op" {

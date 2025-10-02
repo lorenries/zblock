@@ -9,6 +9,7 @@ const fs_util = @import("fs.zig");
 
 const WATCHDOG_INTERVAL_NS: u64 = 5 * std.time.ns_per_s;
 const REFRESH_INTERVAL_SEC: i64 = 600;
+const ALL_GROUP_LABEL = "<all>";
 
 const Session = struct {
     group: []u8,
@@ -24,6 +25,11 @@ const Session = struct {
         allocator.free(self.group);
         self.* = undefined;
     }
+};
+
+const TargetSelection = struct {
+    targets: dns.Targets,
+    label: []u8,
 };
 
 const Daemon = struct {
@@ -187,26 +193,27 @@ const Daemon = struct {
             _ = try self.teardownSessionLocked(false);
         }
 
-        const canonical_group = try config_mod.normalizeGroupNameCopy(self.allocator, start_cmd.group);
-        var free_group = true;
-        defer if (free_group) self.allocator.free(canonical_group);
-
         const config_path = try self.paths.configFile();
         defer self.allocator.free(config_path);
 
         var config = try config_mod.Config.loadFromFile(self.allocator, config_path);
         defer config.deinit();
 
-        if (config.getGroup(canonical_group) == null) {
-            std.log.debug("handleStart: group not found", .{});
-            return makeErrorResponse(self.allocator, "group not found");
-        }
+        var selection = collectTargets(self, &config, start_cmd.group) catch |err| switch (err) {
+            error.GroupNotFound => {
+                std.log.debug("handleStart: group not found", .{});
+                return makeErrorResponse(self.allocator, "group not found");
+            },
+            error.NoDomains => {
+                std.log.debug("handleStart: no domains available", .{});
+                return makeErrorResponse(self.allocator, "no domains configured");
+            },
+            else => return err,
+        };
+        defer selection.targets.deinit(self.allocator);
 
-        const domains = try config.sortedDomains(self.allocator, canonical_group);
-        defer self.allocator.free(domains);
-
-        var targets = try dns.resolveDomains(self.allocator, domains);
-        defer targets.deinit(self.allocator);
+        var session_group_owned = true;
+        errdefer if (session_group_owned) self.allocator.free(selection.label);
 
         const duration_seconds = start_cmd.duration_seconds;
         if (duration_seconds == 0) {
@@ -216,11 +223,11 @@ const Daemon = struct {
             return makeErrorResponse(self.allocator, "duration too large");
         }
 
-        const apply_result = try pf.applyRules(self.allocator, &self.paths, targets, start_cmd.dns_lockdown);
+        const apply_result = try pf.applyRules(self.allocator, &self.paths, selection.targets, start_cmd.dns_lockdown);
 
         const end_epoch = now + @as(i64, @intCast(duration_seconds));
         const new_session = Session{
-            .group = canonical_group,
+            .group = selection.label,
             .start_epoch = now,
             .end_epoch = end_epoch,
             .dns_lockdown = start_cmd.dns_lockdown,
@@ -232,7 +239,7 @@ const Daemon = struct {
 
         std.log.debug("handleStart: session prepared, releasing lock", .{});
         self.session = new_session;
-        free_group = false;
+        session_group_owned = false;
         try self.persistSession();
 
         locked = false;
@@ -265,7 +272,8 @@ const Daemon = struct {
             } else {
                 status.remaining_seconds = 0;
             }
-            status.group = try self.allocator.dupe(u8, session.group);
+            const display_group = if (std.mem.eql(u8, session.group, ALL_GROUP_LABEL)) "all groups" else session.group;
+            status.group = try self.allocator.dupe(u8, display_group);
         }
 
         self.mutex.unlock();
@@ -311,18 +319,22 @@ const Daemon = struct {
         var config = try config_mod.Config.loadFromFile(self.allocator, config_path);
         defer config.deinit();
 
-        if (config.getGroup(session.group) == null) {
-            std.log.warn("group '{s}' removed; keeping session active with existing targets", .{session.group});
-            return;
-        }
+        const group_opt = groupSelectionFromLabel(session.group);
+        var selection = collectTargets(self, &config, group_opt) catch |err| switch (err) {
+            error.GroupNotFound => {
+                std.log.warn("group '{s}' removed; keeping session active with existing targets", .{session.group});
+                return;
+            },
+            error.NoDomains => {
+                std.log.warn("no domains available while refreshing session", .{});
+                return;
+            },
+            else => return err,
+        };
+        defer selection.targets.deinit(self.allocator);
+        self.allocator.free(selection.label);
 
-        const domains = try config.sortedDomains(self.allocator, session.group);
-        defer self.allocator.free(domains);
-
-        var targets = try dns.resolveDomains(self.allocator, domains);
-        defer targets.deinit(self.allocator);
-
-        const apply_result = try pf.applyRules(self.allocator, &self.paths, targets, session.dns_lockdown);
+        const apply_result = try pf.applyRules(self.allocator, &self.paths, selection.targets, session.dns_lockdown);
         if (session.pf_was_enabled) {
             session.pf_was_enabled = apply_result.pf_was_enabled;
         }
@@ -339,18 +351,22 @@ const Daemon = struct {
         var config = try config_mod.Config.loadFromFile(self.allocator, config_path);
         defer config.deinit();
 
-        if (config.getGroup(session.group) == null) {
-            std.log.warn("group '{s}' removed while reapplying; keeping existing tables", .{session.group});
-            return;
-        }
+        const group_opt = groupSelectionFromLabel(session.group);
+        var selection = collectTargets(self, &config, group_opt) catch |err| switch (err) {
+            error.GroupNotFound => {
+                std.log.warn("group '{s}' removed while reapplying; keeping existing tables", .{session.group});
+                return;
+            },
+            error.NoDomains => {
+                std.log.warn("no domains available while reapplying session", .{});
+                return;
+            },
+            else => return err,
+        };
+        defer selection.targets.deinit(self.allocator);
+        self.allocator.free(selection.label);
 
-        const domains = try config.sortedDomains(self.allocator, session.group);
-        defer self.allocator.free(domains);
-
-        var targets = try dns.resolveDomains(self.allocator, domains);
-        defer targets.deinit(self.allocator);
-
-        const apply_result = try pf.applyRules(self.allocator, &self.paths, targets, session.dns_lockdown);
+        const apply_result = try pf.applyRules(self.allocator, &self.paths, selection.targets, session.dns_lockdown);
         if (session.pf_was_enabled) {
             session.pf_was_enabled = apply_result.pf_was_enabled;
         }
@@ -496,6 +512,72 @@ fn runPfClearSync(self: *Daemon, pf_was_enabled: bool) void {
     pf.clearRules(self.allocator, &self.paths, pf_was_enabled) catch |err| {
         std.log.err("failed to clear pf rules: {s}", .{@errorName(err)});
     };
+}
+
+fn collectTargets(self: *Daemon, config: *config_mod.Config, maybe_group: ?[]const u8) !TargetSelection {
+    var domain_storage = std.ArrayListUnmanaged([][]const u8){};
+    defer {
+        for (domain_storage.items) |slice| self.allocator.free(slice);
+        domain_storage.deinit(self.allocator);
+    }
+
+    var domain_list = std.ArrayListUnmanaged([]const u8){};
+    defer domain_list.deinit(self.allocator);
+
+    var label: ?[]u8 = null;
+    var label_owned = false;
+    defer if (label_owned) self.allocator.free(label.?);
+
+    if (maybe_group) |group_raw| {
+        const canonical = try config_mod.normalizeGroupNameCopy(self.allocator, group_raw);
+        defer self.allocator.free(canonical);
+
+        const group_domains = config.sortedDomains(self.allocator, canonical) catch |err| switch (err) {
+            error.InvalidGroupName => return error.GroupNotFound,
+            else => return err,
+        };
+
+        if (group_domains.len == 0) {
+            self.allocator.free(group_domains);
+            return error.NoDomains;
+        }
+
+        try domain_storage.append(self.allocator, group_domains);
+        try domain_list.appendSlice(self.allocator, group_domains);
+
+        label = try self.allocator.dupe(u8, canonical);
+        label_owned = true;
+    } else {
+        var group_it = config.groupsIterator();
+        var any_domains = false;
+        while (group_it.next()) |entry| {
+            const group_domains = config.sortedDomains(self.allocator, entry.key_ptr.*) catch |err| switch (err) {
+                error.InvalidGroupName => return error.GroupNotFound,
+                else => return err,
+            };
+            if (group_domains.len == 0) {
+                self.allocator.free(group_domains);
+                continue;
+            }
+            try domain_storage.append(self.allocator, group_domains);
+            try domain_list.appendSlice(self.allocator, group_domains);
+            any_domains = true;
+        }
+
+        if (!any_domains) return error.NoDomains;
+
+        label = try self.allocator.dupe(u8, ALL_GROUP_LABEL);
+        label_owned = true;
+    }
+
+    const targets = try dns.resolveDomains(self.allocator, domain_list.items);
+    const final_label = label orelse unreachable;
+    label_owned = false;
+    return TargetSelection{ .targets = targets, .label = final_label };
+}
+
+fn groupSelectionFromLabel(label: []const u8) ?[]const u8 {
+    return if (std.mem.eql(u8, label, ALL_GROUP_LABEL)) null else label;
 }
 
 pub fn run(allocator: std.mem.Allocator) !void {
