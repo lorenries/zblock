@@ -887,45 +887,63 @@ fn removeDirIfEmpty(path: []const u8) !void {
 fn printUsage(fd: posix.fd_t) !void {
     try writeAll(fd, "Usage: zblock <command> [options]\n\n" ++
         "Commands:\n" ++
-        "  add <domains...> [--group <name>]   Add domains to a group.\n" ++
-        "  list [--group <name>] [--json]      Show configured domains.\n" ++
-        "  init                                 Prepare config/state directories.\n" ++
-        "  start --for <duration>               Begin a focus session via the daemon.\n" ++
-        "  status [--json]                      Query daemon state.\n" ++
-        "  uninstall [--purge]                  Remove daemon files and pf state.\n" ++
-        "\nRun 'zblock <command> --help' for details on a specific command.\n");
+        "  add <domains...> [--group <name>]               Add domains to a group.\n" ++
+        "  list [--group <name>] [--json]                  Show configured domains.\n" ++
+        "  init                                            Prepare config/state directories.\n" ++
+        "  start --for <duration> [--group <name>] [--dns-lockdown]\n" ++
+        "                                                 Begin a focus session via the daemon.\n" ++
+        "  status [--json]                                Query daemon state.\n" ++
+        "  uninstall [--purge]                            Remove daemon files and pf state.\n" ++
+        "\nRun 'zblock <command> --help' for full option details.\n");
 }
 
 fn printAddHelp(fd: posix.fd_t) !void {
     try writeAll(fd, "Usage: zblock add [--group <name>] <domain> [domain ...]\n\n" ++
         "Adds one or more domains to the specified group.\n" ++
         "Options:\n" ++
-        "  --group <name>   Target group (default: 'default').\n" ++
-        "  --help           Show this help text.\n");
+        "  --group <name>    Target group (default: 'default').\n" ++
+        "  --group=<name>    Alternate --group syntax.\n" ++
+        "  --                Treat subsequent arguments as domains even if they begin with '-'.\n" ++
+        "  --help, -h        Show this help text.\n");
 }
 
 fn printListHelp(fd: posix.fd_t) !void {
     try writeAll(fd, "Usage: zblock list [--group <name>] [--json]\n\n" ++
         "Lists configured domains.\n" ++
         "Options:\n" ++
-        "  --group <name>   Limit output to a single group.\n" ++
-        "  --json           Emit machine-readable JSON.\n" ++
-        "  --help           Show this help text.\n");
+        "  --group <name>    Limit output to a single group.\n" ++
+        "  --group=<name>    Alternate --group syntax.\n" ++
+        "  --json            Emit machine-readable JSON.\n" ++
+        "  --                Treat subsequent arguments as literals.\n" ++
+        "  --help, -h        Show this help text.\n");
 }
 
 fn printStartHelp(fd: posix.fd_t) !void {
     try writeAll(fd, "Usage: zblock start --for <duration> [--group <name>] [--dns-lockdown]\n\n" ++
-        "Duration accepts integers with optional suffix (s, m, h).\n" ++
-        "Example: zblock start --for 45m --group social --dns-lockdown\n");
+        "Starts a focus session for the configured group (default: 'default').\n" ++
+        "Options:\n" ++
+        "  --for <duration>  Required; accepts Ns/Nm/Nh or plain seconds.\n" ++
+        "  --group <name>    Target group (default: 'default').\n" ++
+        "  --group=<name>    Alternate --group syntax.\n" ++
+        "  --dns-lockdown    Block DNS egress (ports 53/853 + known DoH endpoints).\n" ++
+        "  --help, -h        Show this help text.\n" ++
+        "Examples:\n" ++
+        "  zblock start --for 45m\n" ++
+        "  zblock start --for=90m --group social --dns-lockdown\n");
 }
 
 fn printStatusHelp(fd: posix.fd_t) !void {
     try writeAll(fd, "Usage: zblock status [--json]\n\n" ++
-        "Displays the daemon's session status.\n");
+        "Displays the daemon's session status.\n" ++
+        "Options:\n" ++
+        "  --json     Emit machine-readable JSON.\n" ++
+        "  --help,-h  Show this help text.\n");
 }
 
 fn printUninstallHelp(fd: posix.fd_t) !void {
     try writeAll(fd, "Usage: zblock uninstall [--purge]\n\n" ++
         "Stops the launchd service, clears pf rules, and removes generated files.\n" ++
-        "  --purge   Remove config.json as well.\n");
+        "Options:\n" ++
+        "  --purge   Remove config.json as well.\n" ++
+        "  --help,-h Show this help text.\n");
 }
