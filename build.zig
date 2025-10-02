@@ -63,7 +63,7 @@ pub fn build(b: *std.Build) void {
             // b.createModule defines a new module just like b.addModule but,
             // unlike b.addModule, it does not expose the module to consumers of
             // this package, which is why in this case we don't have to give it a name.
-            .root_source_file = b.path("src/main.zig"),
+            .root_source_file = b.path("src/main_cli.zig"),
             // Target and optimization levels must be explicitly wired in when
             // defining an executable or library (in the root module), and you
             // can also hardcode a specific target for an executable or library
@@ -88,6 +88,17 @@ pub fn build(b: *std.Build) void {
     // step). By default the install prefix is `zig-out/` but can be overridden
     // by passing `--prefix` or `-p`.
     b.installArtifact(exe);
+
+    const daemon_exe = b.addExecutable(.{
+        .name = "zblockd",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/daemon_main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "zblock", .module = mod } },
+        }),
+    });
+    b.installArtifact(daemon_exe);
 
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
