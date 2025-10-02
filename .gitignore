@@ -1,2 +1,4 @@
 zig-out/
 .zig-cache/
+certs/
+.DS_Store
