@@ -29,6 +29,72 @@ jobs:
       - name: Run tests
         run: zig build test
 
+      - name: Import signing certificate
+        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/')
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -eo pipefail
+          SIGNING_KEYCHAIN="$RUNNER_TEMP/zblock-signing.keychain-db"
+          CERT_PATH="$RUNNER_TEMP/zblock-cert.p12"
+          echo "$MACOS_CERT_P12" | base64 --decode > "$CERT_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$SIGNING_KEYCHAIN"
+          security set-keychain-settings "$SIGNING_KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$SIGNING_KEYCHAIN"
+          security import "$CERT_PATH" -k "$SIGNING_KEYCHAIN" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$SIGNING_KEYCHAIN"
+          rm -f "$CERT_PATH"
+          echo "SIGNING_KEYCHAIN=$SIGNING_KEYCHAIN" >> "$GITHUB_ENV"
+
+      - name: Code sign binaries
+        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/')
+        env:
+          SIGNING_IDENTITY: ${{ secrets.MACOS_CERT_IDENTITY }}
+        run: |
+          set -eo pipefail
+          codesign --deep --force --options runtime --timestamp \
+            --keychain "$SIGNING_KEYCHAIN" \
+            --sign "$SIGNING_IDENTITY" zig-out/bin/zblock
+          codesign --deep --force --options runtime --timestamp \
+            --keychain "$SIGNING_KEYCHAIN" \
+            --sign "$SIGNING_IDENTITY" zig-out/bin/zblockd
+
+      - name: Package binaries for notarization
+        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -eo pipefail
+          NOTARIZE_DIR="$RUNNER_TEMP/zblock-notarize"
+          rm -rf "$NOTARIZE_DIR"
+          mkdir -p "$NOTARIZE_DIR"
+          cp zig-out/bin/zblock "$NOTARIZE_DIR/"
+          cp zig-out/bin/zblockd "$NOTARIZE_DIR/"
+          NOTARIZE_ARCHIVE="$RUNNER_TEMP/zblock-notarize.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$NOTARIZE_DIR" "$NOTARIZE_ARCHIVE"
+          echo "NOTARIZE_ARCHIVE=$NOTARIZE_ARCHIVE" >> "$GITHUB_ENV"
+
+      - name: Notarize binaries
+        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/')
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -eo pipefail
+          xcrun notarytool submit "$NOTARIZE_ARCHIVE" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --wait
+
+      - name: Staple notarization ticket
+        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -eo pipefail
+          xcrun stapler staple zig-out/bin/zblock
+          xcrun stapler staple zig-out/bin/zblockd
+
       - name: Prepare artifacts
         run: |
           ARCH=$(uname -m)
@@ -41,6 +107,7 @@ jobs:
           echo "ARCH=$ARCH" >> "$GITHUB_ENV"
           echo "OS=$OS" >> "$GITHUB_ENV"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          rm -rf dist
           mkdir -p dist
           cp zig-out/bin/zblock dist/
           cp zig-out/bin/zblockd dist/
@@ -59,3 +126,8 @@ jobs:
           files: dist/zblock-${{ env.VERSION }}-${{ env.OS }}-${{ env.ARCH }}.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cleanup signing keychain
+        if: always() && runner.os == 'macOS' && env.SIGNING_KEYCHAIN != ''
+        run: |
+          security delete-keychain "$SIGNING_KEYCHAIN" || true
