@@ -29,6 +29,27 @@ jobs:
       - name: Run tests
         run: zig build test
 
+      - name: Determine artifact metadata
+        run: |
+          ARCH=$(uname -m)
+          OS=${RUNNER_OS:-unknown}
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            VERSION="${GITHUB_SHA}"
+          fi
+          ARCHIVE_NAME="zblock-${VERSION}-${OS}-${ARCH}.zip"
+          PACKAGE_ROOT="$RUNNER_TEMP/zblock-package"
+          PAYLOAD_DIR="$PACKAGE_ROOT/zblock"
+          FINAL_DIST="$PWD/dist"
+          echo "ARCH=$ARCH" >> "$GITHUB_ENV"
+          echo "OS=$OS" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> "$GITHUB_ENV"
+          echo "PACKAGE_ROOT=$PACKAGE_ROOT" >> "$GITHUB_ENV"
+          echo "PAYLOAD_DIR=$PAYLOAD_DIR" >> "$GITHUB_ENV"
+          echo "FINAL_DIST=$FINAL_DIST" >> "$GITHUB_ENV"
+
       - name: Import signing certificate
         if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/')
         env:
@@ -61,17 +82,16 @@ jobs:
             --keychain "$SIGNING_KEYCHAIN" \
             --sign "$SIGNING_IDENTITY" zig-out/bin/zblockd
 
-      - name: Package binaries for notarization
-        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/')
+      - name: Package signed binaries
+        if: runner.os == 'macOS'
         run: |
           set -eo pipefail
-          NOTARIZE_DIR="$RUNNER_TEMP/zblock-notarize"
-          rm -rf "$NOTARIZE_DIR"
-          mkdir -p "$NOTARIZE_DIR"
-          cp zig-out/bin/zblock "$NOTARIZE_DIR/"
-          cp zig-out/bin/zblockd "$NOTARIZE_DIR/"
-          NOTARIZE_ARCHIVE="$RUNNER_TEMP/zblock-notarize.zip"
-          ditto -c -k --sequesterRsrc --keepParent "$NOTARIZE_DIR" "$NOTARIZE_ARCHIVE"
+          rm -rf "$PACKAGE_ROOT"
+          mkdir -p "$PAYLOAD_DIR"
+          cp zig-out/bin/zblock "$PAYLOAD_DIR/"
+          cp zig-out/bin/zblockd "$PAYLOAD_DIR/"
+          NOTARIZE_ARCHIVE="$PACKAGE_ROOT/$ARCHIVE_NAME"
+          ditto -c -k --sequesterRsrc --keepParent "$PAYLOAD_DIR" "$NOTARIZE_ARCHIVE"
           echo "NOTARIZE_ARCHIVE=$NOTARIZE_ARCHIVE" >> "$GITHUB_ENV"
 
       - name: Notarize binaries
@@ -92,38 +112,32 @@ jobs:
         if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/')
         run: |
           set -eo pipefail
-          xcrun stapler staple zig-out/bin/zblock
-          xcrun stapler staple zig-out/bin/zblockd
+          xcrun stapler staple "$NOTARIZE_ARCHIVE" || {
+            rc=$?
+            if [[ $rc -eq 73 ]]; then
+              echo "Stapler cannot staple this archive format; continuing"
+            else
+              exit $rc
+            fi
+          }
 
       - name: Prepare artifacts
         run: |
-          ARCH=$(uname -m)
-          OS=${RUNNER_OS:-unknown}
-          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            VERSION="${GITHUB_REF_NAME}"
-          else
-            VERSION="${GITHUB_SHA}"
-          fi
-          echo "ARCH=$ARCH" >> "$GITHUB_ENV"
-          echo "OS=$OS" >> "$GITHUB_ENV"
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-          rm -rf dist
-          mkdir -p dist
-          cp zig-out/bin/zblock dist/
-          cp zig-out/bin/zblockd dist/
-          (cd dist && tar -czf "zblock-${VERSION}-${OS}-${ARCH}.tar.gz" zblock zblockd)
+          rm -rf "$FINAL_DIST"
+          mkdir -p "$FINAL_DIST"
+          cp "$NOTARIZE_ARCHIVE" "$FINAL_DIST/$ARCHIVE_NAME"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: zblock-${{ env.VERSION }}-${{ env.OS }}-${{ env.ARCH }}
-          path: dist/zblock-${{ env.VERSION }}-${{ env.OS }}-${{ env.ARCH }}.tar.gz
+          path: dist/${{ env.ARCHIVE_NAME }}
 
       - name: Publish release assets
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/zblock-${{ env.VERSION }}-${{ env.OS }}-${{ env.ARCH }}.tar.gz
+          files: dist/${{ env.ARCHIVE_NAME }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
