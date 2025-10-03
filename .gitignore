@@ -3,3 +3,4 @@ zig-out/
 certs/
 .DS_Store
 .env
+dist/

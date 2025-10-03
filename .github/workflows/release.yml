@@ -42,6 +42,7 @@ jobs:
           PACKAGE_ROOT="$RUNNER_TEMP/zblock-package"
           PAYLOAD_DIR="$PACKAGE_ROOT/zblock"
           FINAL_DIST="$PWD/dist"
+          ARCHIVE_PATH="$PACKAGE_ROOT/$ARCHIVE_NAME"
           echo "ARCH=$ARCH" >> "$GITHUB_ENV"
           echo "OS=$OS" >> "$GITHUB_ENV"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
@@ -49,6 +50,7 @@ jobs:
           echo "PACKAGE_ROOT=$PACKAGE_ROOT" >> "$GITHUB_ENV"
           echo "PAYLOAD_DIR=$PAYLOAD_DIR" >> "$GITHUB_ENV"
           echo "FINAL_DIST=$FINAL_DIST" >> "$GITHUB_ENV"
+          echo "ARCHIVE_PATH=$ARCHIVE_PATH" >> "$GITHUB_ENV"
 
       - name: Import signing certificate
         if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/')
@@ -93,9 +95,7 @@ jobs:
           mkdir -p "$PAYLOAD_DIR"
           cp zig-out/bin/zblock "$PAYLOAD_DIR/"
           cp zig-out/bin/zblockd "$PAYLOAD_DIR/"
-          NOTARIZE_ARCHIVE="$PACKAGE_ROOT/$ARCHIVE_NAME"
-          ditto -c -k --sequesterRsrc --keepParent "$PAYLOAD_DIR" "$NOTARIZE_ARCHIVE"
-          echo "NOTARIZE_ARCHIVE=$NOTARIZE_ARCHIVE" >> "$GITHUB_ENV"
+          ditto -c -k --sequesterRsrc --keepParent "$PAYLOAD_DIR" "$ARCHIVE_PATH"
 
       - name: Notarize binaries
         if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/')
@@ -105,30 +105,17 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
         run: |
           set -eo pipefail
-          xcrun notarytool submit "$NOTARIZE_ARCHIVE" \
+          xcrun notarytool submit "$ARCHIVE_PATH" \
             --apple-id "$APPLE_ID" \
             --team-id "$APPLE_TEAM_ID" \
             --password "$APPLE_APP_SPECIFIC_PASSWORD" \
             --wait
 
-      - name: Staple notarization ticket
-        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/')
-        run: |
-          set -eo pipefail
-          xcrun stapler staple "$NOTARIZE_ARCHIVE" || {
-            rc=$?
-            if [[ $rc -eq 73 ]]; then
-              echo "Stapler cannot staple this archive format; continuing"
-            else
-              exit $rc
-            fi
-          }
-
       - name: Prepare artifacts
         run: |
           rm -rf "$FINAL_DIST"
           mkdir -p "$FINAL_DIST"
-          cp "$NOTARIZE_ARCHIVE" "$FINAL_DIST/$ARCHIVE_NAME"
+          cp "$ARCHIVE_PATH" "$FINAL_DIST/$ARCHIVE_NAME"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
