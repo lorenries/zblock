@@ -1,5 +1,4 @@
 const std = @import("std");
-const atomic = std.atomic;
 const paths_mod = @import("paths.zig");
 const config_mod = @import("config.zig");
 const dns = @import("dns.zig");
@@ -7,7 +6,7 @@ const pf = @import("pf.zig");
 const ipc = @import("ipc.zig");
 const fs_util = @import("fs.zig");
 
-const WATCHDOG_INTERVAL_NS: u64 = 5 * std.time.ns_per_s;
+const WATCHDOG_INTERVAL_SEC: i64 = 5;
 const REFRESH_INTERVAL_SEC: i64 = 600;
 const ALL_GROUP_LABEL = "<all>";
 
@@ -20,6 +19,7 @@ const Session = struct {
     v6_count: usize,
     pf_was_enabled: bool,
     next_refresh_epoch: i64,
+    next_pf_check_epoch: i64,
 
     fn deinit(self: *Session, allocator: std.mem.Allocator) void {
         allocator.free(self.group);
@@ -37,8 +37,6 @@ const Daemon = struct {
     paths: paths_mod.Paths,
     session: ?Session = null,
     mutex: std.Thread.Mutex.Recursive = std.Thread.Mutex.Recursive.init,
-    watchdog_thread: ?std.Thread = null,
-    watchdog_stop: atomic.Value(bool) = atomic.Value(bool).init(true),
 
     pub fn init(allocator: std.mem.Allocator) !Daemon {
         var paths = try paths_mod.Paths.initFromEnv(allocator);
@@ -54,8 +52,6 @@ const Daemon = struct {
             .paths = paths,
             .session = null,
             .mutex = std.Thread.Mutex.Recursive.init,
-            .watchdog_thread = null,
-            .watchdog_stop = atomic.Value(bool).init(true),
         };
 
         try daemon.loadActiveSession();
@@ -66,47 +62,19 @@ const Daemon = struct {
             std.log.info("Restoring active session for group '{s}'", .{session.group});
             daemon.refreshSessionLocked(session) catch |err| {
                 std.log.err("failed to restore session: {s}", .{@errorName(err)});
-                _ = daemon.teardownSessionLocked(false) catch {};
+                daemon.teardownSessionLocked() catch {};
             };
-            if (daemon.session != null) {
-                try daemon.startWatchdogLocked();
-            }
         }
 
         return daemon;
     }
 
     pub fn deinit(self: *Daemon) void {
-        self.stopWatchdog();
         if (self.session != null) {
-            _ = self.teardownSessionLocked(false) catch {};
+            self.teardownSessionLocked() catch {};
         }
         self.paths.deinit();
         self.* = undefined;
-    }
-
-    fn startWatchdogLocked(self: *Daemon) !void {
-        if (self.session == null) return;
-        if (self.watchdog_thread != null) return;
-
-        self.watchdog_stop.store(false, .release);
-        self.watchdog_thread = try std.Thread.spawn(.{}, watchdogMain, .{self});
-    }
-
-    fn startWatchdog(self: *Daemon) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        try self.startWatchdogLocked();
-    }
-
-    fn stopWatchdog(self: *Daemon) void {
-        if (self.watchdog_thread) |thread| {
-            self.watchdog_stop.store(true, .release);
-            thread.join();
-            self.watchdog_thread = null;
-        } else {
-            self.watchdog_stop.store(true, .release);
-        }
     }
 
     fn schedulePfClear(self: *Daemon, pf_was_enabled: bool) void {
@@ -117,38 +85,30 @@ const Daemon = struct {
         thread.detach();
     }
 
-    fn watchdogMain(self: *Daemon) void {
-        defer {
-            self.watchdog_stop.store(true, .release);
-            self.mutex.lock();
-            self.watchdog_thread = null;
-            self.mutex.unlock();
-        }
-
-        while (!self.watchdog_stop.load(.acquire)) {
-            std.Thread.sleep(WATCHDOG_INTERVAL_NS);
-
-            if (self.watchdog_stop.load(.acquire)) break;
-
-            self.mutex.lock();
-            if (self.session) |*session| {
-                const now = std.time.timestamp();
-                if (now >= session.end_epoch) {
-                    _ = self.teardownSessionLocked(true) catch |err| {
-                        std.log.err("failed to teardown session in watchdog: {s}", .{@errorName(err)});
-                    };
-                    self.mutex.unlock();
-                    break;
-                }
-
-                if (now >= session.next_refresh_epoch) {
-                    self.refreshSessionLocked(session) catch |err| {
-                        std.log.err("session refresh failed: {s}", .{@errorName(err)});
-                    };
-                }
-
+    fn tick(self: *Daemon, now: i64) void {
+        self.mutex.lock();
+        if (self.session) |*session| {
+            if (now >= session.end_epoch) {
+                self.teardownSessionLocked() catch |err| {
+                    std.log.err("failed to teardown session: {s}", .{@errorName(err)});
+                };
                 self.mutex.unlock();
+                return;
+            }
 
+            if (now >= session.next_refresh_epoch) {
+                self.refreshSessionLocked(session) catch |err| {
+                    std.log.err("session refresh failed: {s}", .{@errorName(err)});
+                };
+            }
+
+            const pf_due = now >= session.next_pf_check_epoch;
+            if (pf_due) {
+                session.next_pf_check_epoch = now + WATCHDOG_INTERVAL_SEC;
+            }
+            self.mutex.unlock();
+
+            if (pf_due) {
                 const pf_enabled = pf.isEnabled(self.allocator) catch false;
                 if (!pf_enabled) {
                     self.mutex.lock();
@@ -156,14 +116,40 @@ const Daemon = struct {
                         self.reapplySessionLocked(active_session) catch |err| {
                             std.log.err("failed to re-apply pf rules: {s}", .{@errorName(err)});
                         };
+                        active_session.next_pf_check_epoch = std.time.timestamp() + WATCHDOG_INTERVAL_SEC;
                     }
                     self.mutex.unlock();
                 }
-            } else {
-                self.mutex.unlock();
-                break;
             }
+        } else {
+            self.mutex.unlock();
         }
+    }
+
+    fn computePollTimeoutMs(self: *Daemon, now: i64) i32 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.session) |session| {
+            var next_epoch = session.end_epoch;
+            if (session.next_refresh_epoch < next_epoch) {
+                next_epoch = session.next_refresh_epoch;
+            }
+            if (session.next_pf_check_epoch < next_epoch) {
+                next_epoch = session.next_pf_check_epoch;
+            }
+
+            const delta = next_epoch - now;
+            if (delta <= 0) {
+                return 0;
+            }
+            const delta_ms: i64 = delta * 1000;
+            const max_ms: i64 = std.math.maxInt(i32);
+            const capped = if (delta_ms > max_ms) max_ms else delta_ms;
+            return @intCast(capped);
+        }
+
+        return 1000;
     }
 
     fn handleRequest(self: *Daemon, req: ipc.Request) !ipc.Response {
@@ -190,7 +176,7 @@ const Daemon = struct {
             if (now < session.end_epoch) {
                 return makeErrorResponse(self.allocator, "session already active");
             }
-            _ = try self.teardownSessionLocked(false);
+            try self.teardownSessionLocked();
         }
 
         const config_path = try self.paths.configFile();
@@ -235,6 +221,7 @@ const Daemon = struct {
             .v6_count = apply_result.v6_count,
             .pf_was_enabled = apply_result.pf_was_enabled,
             .next_refresh_epoch = now + REFRESH_INTERVAL_SEC,
+            .next_pf_check_epoch = now + WATCHDOG_INTERVAL_SEC,
         };
 
         std.log.debug("handleStart: session prepared, releasing lock", .{});
@@ -245,9 +232,6 @@ const Daemon = struct {
         locked = false;
         self.mutex.unlock();
         std.log.debug("handleStart: mutex released", .{});
-
-        try self.startWatchdog();
-        std.log.debug("handleStart: watchdog started", .{});
 
         const message = try std.fmt.allocPrint(self.allocator, "Blocking until {d}", .{end_epoch});
         defer self.allocator.free(message);
@@ -286,30 +270,20 @@ const Daemon = struct {
     fn ensureSessionFreshnessLocked(self: *Daemon, now: i64) !void {
         if (self.session) |session| {
             if (now >= session.end_epoch) {
-                _ = try self.teardownSessionLocked(false);
+                try self.teardownSessionLocked();
             }
         }
     }
 
-    fn teardownSessionLocked(self: *Daemon, called_from_watchdog: bool) !bool {
+    fn teardownSessionLocked(self: *Daemon) !void {
         if (self.session) |*session| {
             defer session.deinit(self.allocator);
             const pf_was_enabled = session.pf_was_enabled;
             self.session = null;
-            self.watchdog_stop.store(true, .release);
-
-            if (!called_from_watchdog) {
-                if (self.watchdog_thread) |thread| {
-                    thread.detach();
-                    self.watchdog_thread = null;
-                }
-            }
 
             self.deleteActiveFile();
             self.schedulePfClear(pf_was_enabled);
-            return false;
         }
-        return false;
     }
 
     fn refreshSessionLocked(self: *Daemon, session: *Session) !void {
@@ -341,6 +315,7 @@ const Daemon = struct {
         session.v4_count = apply_result.v4_count;
         session.v6_count = apply_result.v6_count;
         session.next_refresh_epoch = std.time.timestamp() + REFRESH_INTERVAL_SEC;
+        session.next_pf_check_epoch = std.time.timestamp() + WATCHDOG_INTERVAL_SEC;
         try self.persistSession();
     }
 
@@ -372,6 +347,7 @@ const Daemon = struct {
         }
         session.v4_count = apply_result.v4_count;
         session.v6_count = apply_result.v6_count;
+        session.next_pf_check_epoch = std.time.timestamp() + WATCHDOG_INTERVAL_SEC;
         try self.persistSession();
     }
 
@@ -454,6 +430,7 @@ const Daemon = struct {
             .v6_count = v6_count,
             .pf_was_enabled = pf_was_enabled,
             .next_refresh_epoch = std.time.timestamp() + REFRESH_INTERVAL_SEC,
+            .next_pf_check_epoch = std.time.timestamp() + WATCHDOG_INTERVAL_SEC,
         };
     }
 
@@ -606,6 +583,29 @@ pub fn run(allocator: std.mem.Allocator) !void {
     std.log.info("zblockd listening on {s}", .{address_cfg.path});
 
     while (true) {
+        const now = std.time.timestamp();
+        daemon.tick(now);
+
+        var poll_fds = [_]std.posix.pollfd{.{
+            .fd = server.stream.handle,
+            .events = std.posix.POLL.IN,
+            .revents = 0,
+        }};
+
+        const timeout_ms = daemon.computePollTimeoutMs(now);
+        const poll_result = std.posix.poll(&poll_fds, timeout_ms) catch |err| {
+            std.log.err("poll failed: {s}", .{@errorName(err)});
+            continue;
+        };
+
+        if (poll_result == 0) {
+            continue;
+        }
+
+        if ((poll_fds[0].revents & std.posix.POLL.IN) == 0) {
+            continue;
+        }
+
         var connection = server.accept() catch |err| {
             std.log.err("accept failed: {s}", .{@errorName(err)});
             continue;
