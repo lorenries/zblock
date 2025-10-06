@@ -4,14 +4,26 @@ Domain-blocking focus tool for macOS that pairs a command-line interface with a 
 
 ## Installation
 
-### Using a Release Tarball
+### Quick Install (recommended)
 
-1. Download the archive matching your platform/architecture from the project releases (named `zblock-<version>-<OS>-<ARCH>.tar.gz`).
+Run the install script to download the latest notarized release, place `zblock`/`zblockd` under `~/.zblock/bin`, and print PATH instructions:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/lorenries/zblock/main/scripts/install.sh | bash
+```
+
+- Use `ZBLOCK_VERSION=v0.x.y` to pin a specific tag.
+- Set `ZBLOCK_INSTALL_DIR` or `ZBLOCK_BIN_DIR` to customize the destination.
+- After installation, ensure `~/.zblock/bin` is on your `PATH` (the script tells you what to add).
+
+### Manual Installation
+
+1. Download the archive matching your platform/architecture from the releases page (`zblock-<version>-<OS>-<ARCH>.zip`).
 2. Extract the binaries:
    ```sh
-   tar -xzvf zblock-<version>-<OS>-<ARCH>.tar.gz
+   unzip zblock-<version>-<OS>-<ARCH>.zip
    ```
-3. Move the executables into your `$PATH` (for example):
+3. Move the executables into your preferred locations, for example:
    ```sh
    sudo mv zblock /usr/local/bin/
    sudo mv zblockd /usr/local/libexec/
